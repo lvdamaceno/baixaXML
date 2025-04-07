@@ -1,147 +1,226 @@
 import csv
 import os
 import time
-from xml.dom import minidom
-from datetime import datetime
-import requests
-import logging
 import json
+import logging
+from datetime import datetime
+from xml.dom import minidom
+import requests
+from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import itertools
 
-# Configurações de logging
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
-# Função para carregar credenciais a partir de um arquivo JSON
-def load_credentials():
+# ------------------- Configurações e utilitários -------------------
+
+def load_credentials(config_file='config.json'):
     try:
-        with open('config.json', 'r') as file:
-            credentials = json.load(file)
-            return credentials
-    except FileNotFoundError:
-        print("Arquivo de configuração não encontrado!")
-        return None
-    except json.JSONDecodeError:
-        print("Erro ao decodificar o arquivo de configuração!")
+        with open(config_file, 'r') as f:
+            return json.load(f)
+    except Exception as e:
+        logger.critical(f"Erro ao carregar config: {e}")
         return None
 
 
 credentials = load_credentials()
-if credentials:
-    token = credentials['token']
-    appkey = credentials['appkey']
-    password = credentials['password']
-    username = credentials['username']
+if not credentials:
+    raise SystemExit("Credenciais inválidas ou inexistentes")
 
-# URL e Cabeçalhos de autenticação
 url_auth = "https://api.sankhya.com.br/login"
-url = "https://api.sankhya.com.br/gateway/v1/mge/service.sbr?serviceName=DbExplorerSP.executeQuery&outputType=json"
-headers_auth = {
-    "token": token,
-    "appkey": appkey,
-    "password": password,
-    "username": username
-}
+url_query = "https://api.sankhya.com.br/gateway/v1/mge/service.sbr?serviceName=DbExplorerSP.executeQuery&outputType=json"
 
-# Query SQL
-query_keys = (f"SELECT top 5 CHAVENFE FROM TGFCAB CAB WHERE CODTIPOPER IN (1110,1101,1105,1112,1181,1111,1243,1509) "
-              f"AND CAB.DTNEG = '{datetime.now().strftime('%d/%m/%Y')}' AND CHAVENFE IS NOT NULL")
+token_cache = {"token": None}
 
 
-def auth():
-    response_auth = requests.post(url_auth, headers=headers_auth)
-    if response_auth.status_code == 200:
-        return response_auth.json().get('bearerToken')
-    else:
-        logging.error(f"Erro na autenticação: {response_auth.status_code} - {response_auth.text}")
-        return None
+def auth(max_retries=3, delay=3):
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = requests.post(url_auth, headers=credentials)
+            if response.status_code == 200:
+                token = response.json().get("bearerToken")
+                if token:
+                    token_cache["token"] = token
+                    return token
+            logger.warning(f"[{attempt}] Erro de autenticação: {response.status_code} - {response.text}")
+        except requests.RequestException as e:
+            logger.error(f"[{attempt}] Exceção: {e}")
+        time.sleep(delay)
+    raise SystemExit("Falha ao autenticar após várias tentativas")
 
 
-def get_data(query):
+# ------------------- Requisições à API -------------------
+
+def get_data(query, max_attempts=5):
+    if not token_cache["token"]:
+        auth()
+
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {auth()}"
+        "Authorization": f"Bearer {token_cache['token']}"
     }
-    data = {
+    payload = {
         "serviceName": "DbExplorerSP.executeQuery",
         "requestBody": {"sql": query}
     }
-    attempt = 0
-    while attempt < 5:
+
+    for attempt in range(1, max_attempts + 1):
         try:
-            response = requests.get(url, headers=headers, json=data, timeout=10)
+            response = requests.get(url_query, headers=headers, json=payload, timeout=10)
+
             if response.status_code == 200:
                 return response.json()
-            else:
-                logging.warning(f"Erro na requisição: {response.status_code}")
-                return None
-        except requests.exceptions.Timeout:
-            logging.warning(f"Timeout na requisição, tentando novamente... ({attempt + 1}/5)")
-            attempt += 1
-            time.sleep(2)
-        except requests.exceptions.RequestException as e:
-            logging.error(f"Erro na requisição: {e}")
-            return None
 
+            elif response.status_code in [401, 403]:
+                logger.warning(f"[{attempt}] Token inválido/expirado, renovando...")
+                auth()  # força renovação do token
+                headers["Authorization"] = f"Bearer {token_cache['token']}"
+
+            else:
+                logger.warning(f"[{attempt}] Erro HTTP {response.status_code} - {response.text}")
+        except requests.exceptions.Timeout:
+            logger.warning(f"[{attempt}] Timeout. Tentando novamente...")
+        except requests.RequestException as e:
+            logger.error(f"[{attempt}] Erro de requisição: {e}")
+        time.sleep(7)
+    return None
+
+
+# ------------------- Processamento de XML -------------------
 
 def create_xml_file(chave):
     query_xml = f"SELECT [XML] FROM TGFNFE WHERE CHAVENFE = '{chave}'"
-    xml_string = get_data(query_xml)['responseBody']['rows'][0][0]
+    result = get_data(query_xml)
+
+    if not result or 'responseBody' not in result or 'rows' not in result['responseBody']:
+        logging.warning(f"Sem dados para a chave: {chave}")
+        return False
+
+    rows = result['responseBody']['rows']
+    if not rows or not rows[0]:
+        logging.warning(f"XML não encontrado - Chave: {chave}")
+        return False
+
+    xml_string = rows[0][0]
     os.makedirs('xmls', exist_ok=True)
 
-    # Gerar o XML formatado com indentação
-    dom = minidom.parseString(xml_string)
-    pretty_xml = dom.toprettyxml(indent="  ")
-
-    file_path = os.path.join('xmls', f'{chave}.xml')
-    with open(file_path, 'w', encoding='utf-8') as file:
-        file.write(pretty_xml)
-
-    logging.info(f"Arquivo XML salvo em: {file_path}")
-
-
-def check_value_in_csv(file_path, value_to_check):
-    with open(file_path, mode='r', newline='', encoding='utf-8') as file:
-        reader = csv.reader(file)
-        return any(value_to_check in row for row in reader)
+    try:
+        dom = minidom.parseString(xml_string)
+        pretty_xml = dom.toprettyxml(indent="  ")
+        file_path = os.path.join('xmls', f'{chave}.xml')
+        with open(file_path, 'w', encoding='utf-8') as file:
+            file.write(pretty_xml)
+        # logging.info(f"XML salvo em: {file_path}")
+        return True
+    except Exception as e:
+        logging.error(f"Erro ao processar XML para {chave}: {e}")
+        return False
 
 
-def chaves_csv():
-    data_formatada = datetime.now().strftime('%Y%m%d')
-    arquivo_csv = f'logs/{data_formatada}.csv'
+# ------------------- Controle de chaves e logs -------------------
 
-    if not os.path.exists(arquivo_csv):
-        with open(arquivo_csv, mode='w', newline='', encoding='utf-8') as file:
-            writer = csv.writer(file)
-            writer.writerow(['Chaves'])  # Cabeçalho do CSV
+def load_existing_chaves(csv_path):
+    if not os.path.exists(csv_path):
+        return set()
+    with open(csv_path, 'r', encoding='utf-8') as f:
+        return {linha.strip() for linha in f}
 
-    rows = get_data(query_keys)['responseBody']['rows']
-    with open(arquivo_csv, mode='a', newline='', encoding='utf-8') as file:
-        writer = csv.writer(file)
+
+def save_chaves_to_csv(query):
+    data_str = datetime.now().strftime('%Y%m%d')
+    path_csv = f'logs/{data_str}.csv'
+    os.makedirs("logs", exist_ok=True)
+
+    chaves_existentes = load_existing_chaves(path_csv)
+    result = get_data(query)
+
+    rows = result.get("responseBody", {}).get("rows", []) if result else []
+    novas_chaves = []
+
+    with open(path_csv, 'a', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
         for row in rows:
             chave = ''.join(filter(str.isdigit, row))
-            if not check_value_in_csv(arquivo_csv, chave):
-                logging.info(f"Adicionando chave: {chave}")
+            if chave and chave not in chaves_existentes:
+                novas_chaves.append(chave)
                 writer.writerow([chave])
+                # logger.info(f"Chave nova adicionada: {chave}")
+
+    return novas_chaves
 
 
-def save_xmls():
-    chaves_csv()
+# ------------------- Execução principal -------------------
 
-    data_formatada = datetime.now().strftime('%Y%m%d')
-    arquivo_csv = f'logs/{data_formatada}.csv'
+def save_xmls(workers, query, data):
+    chaves = save_chaves_to_csv(query)
+    if not chaves:
+        logging.info("Nenhuma nova chave para processar.")
+        return
 
-    with open(arquivo_csv, mode='r', newline='', encoding='utf-8') as file:
-        leitor_csv = csv.reader(file)
-        for linha in leitor_csv:
-            chave = linha[0]
-            nome_arquivo_xml = f"{chave}.xml"
-            caminho_arquivo_xml = os.path.join('xmls', nome_arquivo_xml)
+    total = len(chaves)
+    sucesso = 0
+    falha = 0
+    chaves_com_erro = []
 
-            if os.path.exists(caminho_arquivo_xml):
-                logging.info(f"Arquivo XML já existe: {caminho_arquivo_xml}")
-            else:
-                create_xml_file(chave)
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(create_xml_file, chave): chave for chave in chaves}
+        for future in tqdm(as_completed(futures), total=total, desc=f"Baixando XMLs {data}"):
+            chave = futures[future]
+            try:
+                if future.result():
+                    sucesso += 1
+                else:
+                    falha += 1
+                    chaves_com_erro.append(chave)
+            except Exception as e:
+                logging.error(f"Erro inesperado ao processar chave {chave}: {e}")
+                falha += 1
+                chaves_com_erro.append(chave)
+
+    # Salvar CSV com chaves com erro
+    if chaves_com_erro:
+        data_formatada = datetime.now().strftime('%Y%m%d')
+        os.makedirs('logs', exist_ok=True)
+        caminho_erro_csv = f'logs/erros_{data_formatada}.csv'
+        with open(caminho_erro_csv, 'w', newline='', encoding='utf-8') as file:
+            writer = csv.writer(file)
+            writer.writerow(["CHAVE_COM_ERRO"])
+            for chave in chaves_com_erro:
+                writer.writerow([chave])
+        logging.warning(f"{len(chaves_com_erro)} chaves com erro salvas em {caminho_erro_csv}")
+
+    # Log final
+    logging.info("==== RELATÓRIO FINAL ====")
+    logging.info(f"Total de chaves processadas: {total}")
+    logging.info(f"Sucessos: {sucesso}")
+    logging.info(f"Falhas: {falha}")
+
+
+def load_query(nome, **params):
+    caminho = os.path.join("queries", f"{nome}.sql")
+    with open(caminho, "r", encoding="utf-8") as file:
+        query = file.read()
+        return query.format(**params)
+
+
+def processar_periodos_xml(nome_query, ano_inicio=2013, ano_fim=None, empresas=range(1, 8), max_workers=15):
+    if ano_fim is None:
+        ano_fim = datetime.now().year
+
+    for emp, ano, mes in itertools.product(empresas, range(ano_inicio, ano_fim + 1), range(1, 13)):
+        # Evita meses futuros do ano atual
+        if ano == datetime.now().year and mes > datetime.now().month:
+            continue
+
+        try:
+            query = load_query(nome_query, ano=ano, mes=mes, codemp=emp)
+            descricao = f"{mes:02d}/{ano} Emp {emp}"
+            save_xmls(max_workers, query, descricao)
+        except Exception as e:
+            logging.error(f"Erro ao processar {mes:02d}/{ano} Empresa {emp}: {e}")
 
 
 if __name__ == "__main__":
-    save_xmls()
+    processar_periodos_xml("SAIDAS_ANO_MES_EMP", ano_inicio=2013, empresas=range(1, 8))
