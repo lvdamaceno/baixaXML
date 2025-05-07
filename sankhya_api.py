@@ -1,25 +1,31 @@
-import requests
-import logging
-from utils import load_credentials, load_query
 import time
+import os
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+import requests
+from dotenv import load_dotenv
 
-credentials = load_credentials()
-if not credentials:
-    raise SystemExit("Credenciais inválidas ou inexistentes")
+from utils import load_query
+
+# Carregar variáveis do arquivo .env
+load_dotenv()
 
 urlauth = "https://api.sankhya.com.br/login"
 urlquery = "https://api.sankhya.com.br/gateway/v1/mge/service.sbr?serviceName=DbExplorerSP.executeQuery&outputType=json"
 
 token_cache = {"token": None}
 
+headers = {
+            "token": os.getenv("SANKHYA_TOKEN"),
+            "appkey": os.getenv("SANKHYA_APPKEY"),
+            "username": os.getenv("SANKHYA_USERNAME"),
+            "password": os.getenv("SANKHYA_PASSWORD")
+        }
+
 
 def auth(max_retries=3, delay=3):
     for attempt in range(1, max_retries + 1):
         try:
-            response = requests.post(urlauth, headers=credentials)
+            response = requests.post(urlauth, headers=headers)
             if response.status_code == 200:
                 token = response.json().get("bearerToken")
                 if token:

@@ -192,3 +192,8 @@ config.json
 logs/*
 xmls/*
 *.zip
+
+
+# Ignorar outros arquivos sensíveis ou temporários
+*.sqlite
+*.pyc

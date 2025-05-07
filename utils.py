@@ -1,18 +1,4 @@
-import json
-import logging
 import os
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-
-def load_credentials(config_file='config.json'):
-    try:
-        with open(config_file, 'r') as f:
-            return json.load(f)
-    except Exception as e:
-        logger.critical(f"Erro ao carregar config: {e}")
-        return None
 
 
 def load_existing_nunota(csv_path):
