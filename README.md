@@ -57,6 +57,10 @@ As dependências são:
 
 Os arquivos de log são salvos na pasta `logs/`. Os logs de erro são salvos em arquivos CSV, e os arquivos de notas processadas também são registrados.
 
-## Licença
-
-Este projeto está licenciado sob a MIT License - veja o arquivo [LICENSE](LICENSE) para mais detalhes.
+instalar o python
+instalar o git
+clonar o rep
+criar a venv
+instalar as dependencias
+criar o .bat
+criar o agendamento no windows

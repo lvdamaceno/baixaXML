@@ -1,3 +1,4 @@
+import logging
 import time
 import os
 
@@ -22,18 +23,18 @@ headers = {
         }
 
 
-def auth(max_retries=3, delay=3):
+def auth(max_retries=5, delay=3):
     for attempt in range(1, max_retries + 1):
         try:
-            response = requests.post(urlauth, headers=headers)
+            response = requests.post(urlauth, headers=headers, timeout=60)
             if response.status_code == 200:
                 token = response.json().get("bearerToken")
                 if token:
                     token_cache["token"] = token
                     return token
-            logger.warning(f"[{attempt}] Erro de autenticação: {response.status_code} - {response.text}")
+            logging.warning(f"[{attempt}] Erro de autenticação: {response.status_code} - {response.text}")
         except requests.RequestException as e:
-            logger.error(f"[{attempt}] Exceção: {e}")
+            logging.error(f"[{attempt}] Exceção: {e}")
         time.sleep(delay)
     raise SystemExit("Falha ao autenticar após várias tentativas")
 
@@ -58,21 +59,21 @@ def get_data(query, max_attempts=5):
 
     for attempt in range(1, max_attempts + 1):
         try:
-            response = requests.get(urlquery, headers=headers, json=payload, timeout=30)
+            response = requests.get(urlquery, headers=headers, json=payload, timeout=60)
 
             if response.status_code == 200:
                 return response.json()
 
             elif response.status_code in [401, 403]:
-                logger.warning(f"[{attempt}] Token inválido/expirado, renovando...")
+                logging.warning(f"[{attempt}] Token inválido/expirado, renovando...")
                 auth()  # força renovação do token
                 headers["Authorization"] = f"Bearer {token_cache['token']}"
 
             else:
-                logger.warning(f"[{attempt}] Erro HTTP {response.status_code} - {response.text}")
+                logging.warning(f"[{attempt}] Erro HTTP {response.status_code} - {response.text}")
         except requests.exceptions.Timeout:
-            logger.warning(f"[{attempt}] Timeout. Tentando novamente...")
+            logging.warning(f"[{attempt}] Timeout. Tentando novamente...")
         except requests.RequestException as e:
-            logger.error(f"[{attempt}] Erro de requisição: {e}")
+            logging.error(f"[{attempt}] Erro de requisição: {e}")
         time.sleep(7)
     return None
