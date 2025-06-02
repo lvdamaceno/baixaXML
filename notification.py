@@ -25,7 +25,10 @@ def enviar_notificacao_telegram(mensagem):
         response = requests.post(url, data=payload)
         if response.status_code == 200:
             print("Notificação enviada com sucesso!")
+            return True
         else:
             print(f"Falha ao enviar notificação: {response.status_code}")
+            return False
     except requests.exceptions.RequestException as e:
         print(f"Ocorreu um erro: {e}")
+        return None
